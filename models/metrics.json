@@ -1,9 +1,9 @@
 {
   "project": "Smart Campus Crowd-Balancing and Space Routing Engine",
-  "generated_at": "2026-11-22T20:44:31+08:00",
+  "generated_at": "2026-11-22T22:12:57+08:00",
   "dataset": {
     "file": "data/cityuhk_campus_data.csv",
-    "rows": 960,
+    "rows": 2889,
     "zones": 9,
     "features": [
       "week",
@@ -19,15 +19,15 @@
       "classification": "congestion_level"
     },
     "class_mix": {
-      "Low": 562,
-      "High": 201,
-      "Medium": 197
+      "Low": 2194,
+      "Medium": 365,
+      "High": 330
     }
   },
   "splits": {
     "strategy": "time-ordered: week 1-2 train, week 3 first half validation, week 3 second half test",
     "train": {
-      "rows": 640,
+      "rows": 1926,
       "share": 0.6667,
       "weeks": [
         1,
@@ -35,24 +35,24 @@
       ]
     },
     "validation": {
-      "rows": 160,
-      "share": 0.1667,
+      "rows": 481,
+      "share": 0.1665,
       "weeks": [
         3
       ]
     },
     "test": {
-      "rows": 160,
-      "share": 0.1667,
+      "rows": 482,
+      "share": 0.1668,
       "weeks": [
         3
       ]
     }
   },
   "hyperparameters": {
-    "ridge_alpha": 0.3,
-    "mlp_alpha": 1e-05,
-    "mlp_random_state": 7,
+    "ridge_alpha": 0.01,
+    "mlp_alpha": 0.001,
+    "mlp_random_state": 42,
     "mlp_hidden_layer_sizes": [
       32
     ],
@@ -63,35 +63,35 @@
   },
   "metrics": {
     "Historical Slot Average (baseline)": {
-      "mae_wait_mins": 2.111234375,
-      "macro_f1": 0.7578401280708723,
-      "accuracy": 0.79375,
-      "latency_ms_per_row": 0.00519874993187841,
+      "mae_wait_mins": 1.6051991330764672,
+      "macro_f1": 0.7274247565817197,
+      "accuracy": 0.8921161825726142,
+      "latency_ms_per_row": 0.0014178423719148295,
       "kind": "baseline",
       "detail": "weekday x time-slot historical mean / majority class, global fallback"
     },
     "Linear Regression + Logistic Regression (baseline)": {
-      "mae_wait_mins": 0.9521718514259957,
-      "macro_f1": 0.7985910782223337,
-      "accuracy": 0.84375,
-      "latency_ms_per_row": 0.055007499759085476,
+      "mae_wait_mins": 0.9294742510623069,
+      "macro_f1": 0.7114207321441364,
+      "accuracy": 0.8941908713692946,
+      "latency_ms_per_row": 0.018535477144999188,
       "kind": "baseline",
       "detail": "plain one-hot block, softmax cross-entropy logistic classifier, no feature engineering"
     },
     "Ridge + MLPClassifier (selected)": {
-      "mae_wait_mins": 0.585368119332847,
-      "macro_f1": 0.8700226757369615,
-      "accuracy": 0.89375,
-      "latency_ms_per_row": 0.06548749988724012,
+      "mae_wait_mins": 0.6627995920094747,
+      "macro_f1": 0.7498509485094851,
+      "accuracy": 0.9107883817427386,
+      "latency_ms_per_row": 0.021878423176984074,
       "kind": "selected",
-      "detail": "Ridge alpha=0.3 (L2, tuned on validation), MLP (32,) ReLU+Adam alpha=1e-05 seed=7"
+      "detail": "Ridge alpha=0.01 (L2, tuned on validation), MLP (32,) ReLU+Adam alpha=0.001 seed=42"
     }
   },
   "verdict": {
     "ridge_beats_baselines": true,
     "mlp_beats_baselines": true,
-    "best_baseline_mae": 0.9521718514259957,
-    "best_baseline_macro_f1": 0.7985910782223337
+    "best_baseline_mae": 0.9294742510623069,
+    "best_baseline_macro_f1": 0.7274247565817197
   },
   "limitations": [
     "Synthetic field-survey model: real queues react to weather, exams and unregistered events.",

@@ -68,7 +68,7 @@ MLP_SEEDS = (7, 42, 2024)
 # --------------------------------------------------------------------------- #
 def time_ordered_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Chronological split: week 1-2 train, week 3 front validation, tail test."""
-    week_order = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4}
+    week_order = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
     ordered = df.assign(
         _week=df["week"].astype(int),
         _day=df["weekday"].map(week_order).astype(int),

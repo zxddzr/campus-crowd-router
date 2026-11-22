@@ -4,20 +4,29 @@ Run::
 
     python src/generate_data.py
 
-Writes ``data/cityuhk_campus_data.csv`` with N = 960 aggregate observations:
+Writes ``data/cityuhk_campus_data.csv`` — aggregate observations covering the
+**whole service day and the whole week**:
 
-    3 teaching weeks x 5 weekdays x 8 fifteen-minute snapshots x 8 zones
-    (nine zones in total, one rests each day so that the total lands on 960)
+    3 teaching weeks x 7 weekdays x 18 fifteen-minute snapshots (07:30-21:30)
 
-Each row is one *aggregate* observation of a zone at a snapshot:
+Every snapshot only records zones that are actually **open** at that moment:
+
+* canteens serve 07:30-21:00 (AC3 Bistro is closed on Sundays),
+* study areas follow the library day (07:30-22:00),
+* at most 8 zones are surveyed per snapshot (the survey team rotates).
+
+Each row is one aggregate observation:
 
     week, weekday, time_slot, zone_id, service_type, zone_capacity,
     nearby_class_dismissals, wait_time_mins, congestion_level
 
-The wait time is generated from the stopwatch bottleneck decomposition of each
-canteen (order screen / food pickup / find a seat / utensils), scaled by an
-occupancy load factor.  The congestion label is derived independently from the
+The wait time comes from the stopwatch bottleneck decomposition of each canteen
+(order screen / food pickup / find a seat / utensils) scaled by an occupancy
+load factor.  The congestion label is derived independently from the
 occupancy-to-capacity ratio (Low < 60 %, Medium 60-85 %, High > 85 %).
+
+Weekend demand is deliberately much lower than weekdays, and there are no
+class-dismissal waves on Saturday or Sunday.
 
 Privacy: aggregated counts and durations only -- no identity, no device data.
 """
@@ -38,7 +47,7 @@ from src.campus_config import (  # noqa: E402
     FEATURE_COLUMNS,
     HIGH_THRESHOLD,
     LOW_THRESHOLD,
-    N_RECORDS,
+    MAX_ZONES_PER_SLOT,
     OBSERVED_SLOTS,
     RANDOM_SEED,
     TARGET_CONGESTION,
@@ -46,49 +55,37 @@ from src.campus_config import (  # noqa: E402
     WEEKDAYS,
     WEEKS,
     ZONES,
-    expected_dismissals,
+    demand_pressure,
+    is_service_open,
     to_minutes,
 )
 
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_CSV = DATA_DIR / "cityuhk_campus_data.csv"
 
-# Day-level mood: Mondays are busier, Fridays emptier, week 3 slightly lighter.
-WEEKDAY_FACTOR = {"Mon": 1.05, "Tue": 1.03, "Wed": 1.00, "Thu": 0.98, "Fri": 0.94}
+# Day-level mood: Mondays busiest, Fridays lighter, weekends much quieter.
+WEEKDAY_FACTOR = {
+    "Mon": 1.05, "Tue": 1.03, "Wed": 1.00, "Thu": 0.98,
+    "Fri": 0.94, "Sat": 0.62, "Sun": 0.55,
+}
 WEEK_FACTOR = {1: 1.00, 2: 1.03, 3: 0.97}
+WEEKEND = ("Sat", "Sun")
 
 
-def lunch_pressure(minute_of_day: float) -> float:
-    """Non-linear lunch demand curve on the CityUHK campus.
-
-    Three overlapping peaks: a broad midday hump (12:00), a sharp 11:50
-    class-dismissal wave and a smaller 12:50 wave.  Outside 11:00-14:30 the
-    curve collapses to (almost) zero, which is what makes a plain linear model
-    struggle here.
-    """
-    hour = minute_of_day / 60.0
-    broad = 1.00 * np.exp(-(((hour - 12.25) / 0.85) ** 2))
-    wave_a = 0.55 * np.exp(-(((hour - 11.83) / 0.20) ** 2))   # 11:50 dismissal
-    wave_b = 0.45 * np.exp(-(((hour - 12.85) / 0.22) ** 2))   # 12:50 dismissal
-    return float(broad + wave_a + wave_b)
-
-
-def class_dismissals(minute_of_day: float, rng: np.random.Generator) -> int:
+def class_dismissals(minute_of_day: float, weekday: str, rng: np.random.Generator) -> int:
     """Students released by nearby lectures in the last 10 minutes.
 
-    Two explosive, non-linear spikes at 11:50 and 12:50 sitting on a small
-    Poisson background -- exactly the pattern a hand-timed field survey shows.
-    The amplitude of the wave varies from day to day (a 09:00 lecture that ends
-    early, a cancelled class, a society event spilling out), so the *same*
-    weekday/time-slot does not always produce the same headcount.  Without that
-    variance a lookup table would be enough and the MLP would have nothing to
-    add.
+    Weekdays have the two sharp non-linear spikes at 11:50 and 12:50; the
+    weekend has no timetable, so only background footfall remains.
     """
+    if weekday in WEEKEND:
+        return int(max(0, rng.poisson(5)))
     hour = minute_of_day / 60.0
     amplitude = float(np.exp(rng.normal(0.0, 0.26)))
-    scheduled_wave = expected_dismissals(minute_of_day) - 6  # timetable part only
+    spike_a = 190.0 * amplitude * np.exp(-(((hour - 11.833) / 0.25) ** 2))
+    spike_b = 135.0 * amplitude * np.exp(-(((hour - 12.833) / 0.25) ** 2))
     background = float(rng.poisson(6))
-    value = background + scheduled_wave * amplitude + float(rng.normal(0.0, 5.0))
+    value = background + spike_a + spike_b + float(rng.normal(0.0, 5.0))
     return int(max(0, round(value)))
 
 
@@ -107,20 +104,17 @@ def occupancy_ratio(
 ) -> float:
     """People-inside / seats.
 
-    Two additive demand sources:
-
-    * a smooth lunch curve ``0.18 + 0.52 * pressure * popularity``, and
-    * a **saturating surge** driven by the dismissal wave.  A zone absorbs the
-    wave until roughly 55 % of its seat capacity has been dumped in front of
-    it; past that point occupancy climbs steeply (the classic "queue collapses"
-    threshold).  That is a genuine non-linear interaction between two raw
-    features (headcount x capacity), which a plain linear model cannot express
-    while a one-hidden-layer network can.
+    Two additive demand sources: a smooth demand curve and a **saturating
+    surge** driven by the dismissal wave.  A zone absorbs the wave until about
+    75 % of its seat capacity has been dumped in front of it; past that point
+    occupancy climbs steeply.  That is a genuine non-linear interaction between
+    two raw features (headcount x capacity), which a plain linear model cannot
+    express while a one-hidden-layer network can.
     """
     critical = 0.75 * capacity
     steepness = 0.18 * capacity
     surge = 0.55 * popularity / (1.0 + np.exp(-(dismissals - critical) / steepness))
-    ratio = 0.22 + 0.56 * pressure * popularity * mood + surge + float(rng.normal(0.0, 0.04))
+    ratio = 0.28 + 0.60 * pressure * popularity * mood + surge + float(rng.normal(0.0, 0.04))
     return float(np.clip(ratio, 0.10, 1.35))
 
 
@@ -138,9 +132,8 @@ def wait_time(zone: dict, factor: float, rng: np.random.Generator) -> float:
     for _label, low, peak in zone["phases"]:
         floor = low * 0.35
         value = floor + (peak - floor) * factor
-        value *= float(np.exp(rng.normal(0.0, 0.13)))  # stopwatch observation jitter
+        value *= float(np.exp(rng.normal(0.0, 0.13)))
         total += max(value, 0.05)
-    # Aggregate stopwatch uncertainty (reaction lag, rounding, walking into the queue).
     total = max(total + float(rng.normal(0.0, 0.18)), 0.05)
     return round(total, 2)
 
@@ -153,18 +146,19 @@ def build_dataset() -> pd.DataFrame:
 
     for week in WEEKS:
         for weekday in WEEKDAYS:
-            # One zone "rests" each day (survey team rotation) -> 8 zones x 8 slots.
-            resting = day_index % len(zones)
             mood = WEEK_FACTOR[week] * WEEKDAY_FACTOR[weekday] * float(np.exp(rng.normal(0.0, 0.09)))
 
             for slot in OBSERVED_SLOTS:
                 minute = to_minutes(slot)
-                pressure = lunch_pressure(minute)
-                dismissals = class_dismissals(minute, rng)
+                pressure = demand_pressure(minute)
+                dismissals = class_dismissals(minute, weekday, rng)
 
-                for zone_pos, zone in enumerate(zones):
-                    if zone_pos == resting:
-                        continue
+                open_zones = [z for z in zones if is_service_open(z["zone_id"], weekday, minute)]
+                if len(open_zones) > MAX_ZONES_PER_SLOT:
+                    resting = day_index % len(open_zones)
+                    open_zones = [z for i, z in enumerate(open_zones) if i != resting]
+
+                for zone in open_zones:
                     ratio = occupancy_ratio(
                         pressure=pressure,
                         dismissals=dismissals,
@@ -188,7 +182,11 @@ def build_dataset() -> pd.DataFrame:
                     )
             day_index += 1
 
-    ordered = ["week", "weekday", "time_slot", *[c for c in FEATURE_COLUMNS if c not in ("week", "weekday", "time_slot")], TARGET_WAIT, TARGET_CONGESTION]
+    ordered = [
+        "week", "weekday", "time_slot",
+        *[c for c in FEATURE_COLUMNS if c not in ("week", "weekday", "time_slot")],
+        TARGET_WAIT, TARGET_CONGESTION,
+    ]
     return pd.DataFrame(rows, columns=ordered)
 
 
@@ -196,25 +194,31 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df = build_dataset()
 
-    assert len(df) == N_RECORDS, f"expected {N_RECORDS} rows, generated {len(df)}"
     assert df["zone_id"].nunique() == len(ZONES), "every zone must appear"
     assert df[TARGET_CONGESTION].isin(["Low", "Medium", "High"]).all()
     assert (df[TARGET_WAIT] > 0).all()
+    assert set(df["weekday"].unique()) == set(WEEKDAYS), "all seven weekdays covered"
 
     df.to_csv(OUTPUT_CSV, index=False)
 
     print(f"[generate_data] wrote {len(df)} rows -> {OUTPUT_CSV}")
     print(f"[generate_data] zones            : {df['zone_id'].nunique()}")
-    print(f"[generate_data] weeks x weekdays : {sorted(df['week'].unique())} x {sorted(df['weekday'].unique())}")
-    print(f"[generate_data] snapshots/day    : {df['time_slot'].nunique()} -> {sorted(df['time_slot'].unique())}")
+    print(f"[generate_data] weeks             : {sorted(df['week'].unique())}")
+    print(f"[generate_data] weekdays          : {list(WEEKDAYS)}")
+    print(f"[generate_data] snapshots/day     : {len(OBSERVED_SLOTS)} -> {OBSERVED_SLOTS[0]} … {OBSERVED_SLOTS[-1]}")
     print("[generate_data] congestion mix   :")
     print(df[TARGET_CONGESTION].value_counts().to_string())
-    print("[generate_data] wait time by zone (min / mean / max):")
-    summary = df.groupby("zone_id")[TARGET_WAIT].agg(["min", "mean", "max"]).round(2)
-    print(summary.to_string())
-    print("[generate_data] lunch-peak vs off-peak mean wait:")
-    peak = df["time_slot"].isin(["11:30", "11:45", "12:00", "12:30", "13:00", "13:30"])
-    print(f"  peak {df.loc[peak, TARGET_WAIT].mean():.2f} min | off-peak {df.loc[~peak, TARGET_WAIT].mean():.2f} min")
+    print("[generate_data] rows per weekday :")
+    print(df.groupby("weekday").size().to_string())
+    print("[generate_data] mean wait by weekday (min):")
+    print(df.groupby("weekday")[TARGET_WAIT].mean().round(2).to_string())
+    print("[generate_data] weekend vs weekday mean wait:")
+    weekend = df["weekday"].isin(["Sat", "Sun"])
+    print(f"  weekday {df.loc[~weekend, TARGET_WAIT].mean():.2f} min | "
+          f"weekend {df.loc[weekend, TARGET_WAIT].mean():.2f} min")
+    print("[generate_data] AC3 rows on Sunday (should be 0 for the canteen):")
+    sun_ac3 = df[(df["weekday"] == "Sun") & (df["zone_id"].str.startswith("AC3"))]
+    print(f"  {len(sun_ac3)} rows")
 
 
 if __name__ == "__main__":
