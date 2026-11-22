@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling / editors
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.swp
+
+# Streamlit local state
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Scratch files (local experiments only; deliverables are src/ + app.py)
+tmp_*.py
+scratch_*.py
+*.log

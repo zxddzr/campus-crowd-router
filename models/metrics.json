@@ -1,0 +1,103 @@
+{
+  "project": "Smart Campus Crowd-Balancing and Space Routing Engine",
+  "generated_at": "2026-11-22T20:11:42+08:00",
+  "dataset": {
+    "file": "data/cityuhk_campus_data.csv",
+    "rows": 960,
+    "zones": 9,
+    "features": [
+      "week",
+      "weekday",
+      "time_slot",
+      "zone_id",
+      "service_type",
+      "zone_capacity",
+      "nearby_class_dismissals"
+    ],
+    "targets": {
+      "regression": "wait_time_mins",
+      "classification": "congestion_level"
+    },
+    "class_mix": {
+      "Low": 562,
+      "High": 201,
+      "Medium": 197
+    }
+  },
+  "splits": {
+    "strategy": "time-ordered: week 1-2 train, week 3 first half validation, week 3 second half test",
+    "train": {
+      "rows": 640,
+      "share": 0.6667,
+      "weeks": [
+        1,
+        2
+      ]
+    },
+    "validation": {
+      "rows": 160,
+      "share": 0.1667,
+      "weeks": [
+        3
+      ]
+    },
+    "test": {
+      "rows": 160,
+      "share": 0.1667,
+      "weeks": [
+        3
+      ]
+    }
+  },
+  "hyperparameters": {
+    "ridge_alpha": 0.3,
+    "mlp_alpha": 1e-05,
+    "mlp_random_state": 7,
+    "mlp_hidden_layer_sizes": [
+      32
+    ],
+    "mlp_activation": "relu",
+    "mlp_solver": "adam",
+    "mlp_lr_init": 0.003,
+    "mlp_batch_size": 16
+  },
+  "metrics": {
+    "Historical Slot Average (baseline)": {
+      "mae_wait_mins": 2.111234375,
+      "macro_f1": 0.7578401280708723,
+      "accuracy": 0.79375,
+      "latency_ms_per_row": 0.0035274999390821904,
+      "kind": "baseline",
+      "detail": "weekday x time-slot historical mean / majority class, global fallback"
+    },
+    "Linear Regression + Logistic Regression (baseline)": {
+      "mae_wait_mins": 0.9521718514259957,
+      "macro_f1": 0.7985910782223337,
+      "accuracy": 0.84375,
+      "latency_ms_per_row": 0.05247375011094846,
+      "kind": "baseline",
+      "detail": "plain one-hot block, softmax cross-entropy logistic classifier, no feature engineering"
+    },
+    "Ridge + MLPClassifier (selected)": {
+      "mae_wait_mins": 0.585368119332847,
+      "macro_f1": 0.8700226757369615,
+      "accuracy": 0.89375,
+      "latency_ms_per_row": 0.05754999983764719,
+      "kind": "selected",
+      "detail": "Ridge alpha=0.3 (L2, tuned on validation), MLP (32,) ReLU+Adam alpha=1e-05 seed=7"
+    }
+  },
+  "verdict": {
+    "ridge_beats_baselines": true,
+    "mlp_beats_baselines": true,
+    "best_baseline_mae": 0.9521718514259957,
+    "best_baseline_macro_f1": 0.7985910782223337
+  },
+  "limitations": [
+    "Synthetic field-survey model: real queues react to weather, exams and unregistered events.",
+    "Sudden rain pushes everyone indoors -> wait times can jump beyond the training range.",
+    "Unlisted student activities (society fair, career talk) create demand spikes the model has never seen.",
+    "Only 3 teaching weeks are covered; semester-start and exam-period behaviour differ.",
+    "Per-phase bottlenecks shown in the dashboard are structure-weighted estimates, not separate predictions."
+  ]
+}
