@@ -1,9 +1,11 @@
 # Smart Campus Crowd-Balancing & Space Routing Engine
 
-**GE2340 · City University of Hong Kong** · mobile-first, fully local demo · **v2.0**
+**GE2340 · City University of Hong Kong** · mobile-first, demo · 
+
+**https://cityuhk-crowd-router.streamlit.app/**
 
 Predict the **queue you are about to walk into** — not the queue you left behind.
-The app predicts waiting time (regression) and congestion level
+The website predicts waiting time (regression) and congestion level
 `Low / Medium / High` (3-class) for nine CityUHK canteens and study areas,
 walks you there through the real corridor network, and ranks the options:
 
@@ -140,29 +142,6 @@ Coverage: **3 teaching weeks × Mon–Sun × 07:30–21:30 snapshots (18 per day
 class-dismissal waves; AC3 produces **zero** Sunday rows because it is closed.
 
 Reproducibility: fixed numpy seed (`20241122`).
-
----
-
-## Quick start
-
-```bash
-pip install -r requirements.txt
-
-python src/generate_data.py     # -> data/cityuhk_campus_data.csv  (2 889 rows)
-python src/train_models.py      # -> models/*.joblib + metrics.json
-streamlit run app.py            # opens on http://localhost:8501
-```
-
-Verification (data → metrics → serving → walking network → opening hours →
-i18n completeness → dashboard render; also asserts the English locale contains
-no CJK characters):
-
-```bash
-python tests/smoke_test.py
-```
-
-Requirements: Python 3.10+, `pandas`, `numpy`, `scikit-learn`, `joblib`,
-`streamlit>=1.50`, `plotly`. No API keys, no network access at runtime.
 
 ---
 
