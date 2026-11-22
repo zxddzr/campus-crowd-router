@@ -8,12 +8,13 @@ Run::
 
 Checks
 ------
-1. the dataset exists and has the promised shape / privacy-safe schema,
+1. dataset shape / privacy-safe schema,
 2. both selected models beat both baselines on the held-out split,
 3. the serving path (feature frame -> Ridge + MLP) returns sane values,
-4. the real-campus walking model matches the surveyed routes,
-5. the map coordinates stay inside their building footprints,
-6. the Streamlit dashboard renders without raising (via ``AppTest``).
+4. the corridor walking network matches the surveyed routes,
+5. the food-category filter matches the real canteen menus,
+6. the map geometry stays inside the building footprints,
+7. the Streamlit dashboard renders without raising (via ``AppTest``).
 """
 
 from __future__ import annotations
@@ -32,18 +33,24 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.campus_config import (  # noqa: E402
     BUILDING_BOXES,
+    CAT_ASIAN,
+    CAT_NOODLE,
+    CAT_RICE,
+    CAT_WESTERN,
     CONGESTION_LEVELS,
     CROWD_PENALTY,
     FEATURE_COLUMNS,
     N_RECORDS,
+    NETWORK_COORDS,
     ORIGIN_LABELS,
-    ORIGINS,
-    USER_NEEDS,
+    STUDY_GOAL,
     ZONE_BY_ID,
+    canteen_dishes,
     expected_dismissals,
     from_minutes,
     walk_time,
-    zones_for_need,
+    zones_for_category,
+    zones_for_goal,
 )
 
 MODEL_DIR = PROJECT_ROOT / "models"
@@ -57,6 +64,10 @@ def check(condition: bool, message: str) -> None:
     print(f"[{status}] {message}")
     if not condition:
         failures.append(message)
+
+
+def buildings_of(zone_ids: list[str]) -> set[str]:
+    return {ZONE_BY_ID[z]["building"] for z in zone_ids}
 
 
 def main() -> None:
@@ -88,14 +99,14 @@ def main() -> None:
 
     rows = []
     for minute in (11 * 60 + 30, 12 * 60, 12 * 60 + 45, 15 * 60):
-        for zone_id in zones_for_need("Counter Meal"):
+        for zone_id in zones_for_category(CAT_RICE):
             rows.append(
                 {
                     "week": 3,
                     "weekday": "Wed",
                     "time_slot": from_minutes(minute),
                     "zone_id": zone_id,
-                    "service_type": "Counter",
+                    "service_type": ZONE_BY_ID[zone_id]["service_type"],
                     "zone_capacity": ZONE_BY_ID[zone_id]["capacity"],
                     "nearby_class_dismissals": expected_dismissals(minute),
                 }
@@ -114,38 +125,69 @@ def main() -> None:
     check(bool(wait[peak_mask].mean() > wait[~peak_mask].mean()),
           "lunch-peak predictions exceed off-peak predictions")
 
-    print("\n== 4. walking model (real campus routes) ==")
-    check(ORIGIN_LABELS == ("AC1 (YEUNG 4/F LT)", "Library (YEUNG 3/F)", "AC2 (LI)", "AC3 (LAU)"),
+    print("\n== 4. corridor walking network ==")
+    check(ORIGIN_LABELS == ("AC1 (YEUNG 4/F LT)", "AC2 (LI)", "AC3 (LAU)", "Halls (九龙塘宿舍)"),
           f"four departure points defined: {ORIGIN_LABELS}")
-    check(walk_time("AC1 (YEUNG 4/F LT)", "AC1 Canteen") == 1.4,
-          "AC1 4/F LT -> AC1 Canteen 5/F = 1.4 min (one floor up)")
-    check(walk_time("AC1 (YEUNG 4/F LT)", "Library 3/F") == 1.4,
-          "AC1 4/F LT -> Library 3/F = 1.4 min (same building)")
-    check(3.0 <= walk_time("AC1 (YEUNG 4/F LT)", "AC2 Canteen (Counter)") <= 4.0,
-          "AC1 -> AC2 within the surveyed 3-4 min range")
-    check(4.0 <= walk_time("AC1 (YEUNG 4/F LT)", "AC3 Bistro (Counter)") <= 5.0,
-          "AC1 -> AC3 within the surveyed 4-5 min range")
-    check(walk_time("AC2 (LI)", "AC3 Bistro (Counter)") == 3.0, "AC2 -> AC3 = 3.0 min")
-    check(walk_time("AC2 (LI)", "AC2 Canteen (Counter)") == 1.8, "AC2 1/F -> AC2 Canteen 3/F = 1.8 min")
-    check(walk_time("AC3 (LAU)", "AC3 Bistro (Counter)") == 3.4, "AC3 1/F -> AC3 Bistro 7/F = 3.4 min")
+    check(walk_time("AC1 (YEUNG 4/F LT)", "AC1 Canteen") == 1.5,
+          "AC1 4/F -> AC1 Canteen 5/F = 1.5 min (elevator)")
+    check(walk_time("AC1 (YEUNG 4/F LT)", "Library 3/F") == 1.5,
+          "AC1 4/F -> Library 3/F = 1.5 min (same tower)")
+    check(walk_time("AC1 (YEUNG 4/F LT)", "AC2 Canteen (Counter)") == 6.5,
+          "AC1 4/F -> AC2 3/F = 6.5 min (5 min corridor + 1.5 min lift from B2)")
+    check(walk_time("AC1 (YEUNG 4/F LT)", "AC3 Canteen (Counter)") == 8.0,
+          "AC1 4/F -> AC3 7/F = 8.0 min (shortest path via AC1 5/F - AC3 3/F)")
+    check(walk_time("AC2 (LI)", "AC3 Canteen (Counter)") == 2.5,
+          "AC2 G/F -> AC3 7/F = 2.5 min (1 min corridor + 1.5 min lift)")
+    check(walk_time("AC2 (LI)", "AC2 Canteen (Counter)") == 1.5, "AC2 G/F -> AC2 3/F = 1.5 min")
+    check(walk_time("AC3 (LAU)", "AC3 Canteen (Counter)") == 1.5, "AC3 G/F -> AC3 7/F = 1.5 min")
+    check(15.0 <= walk_time("Halls (九龙塘宿舍)", "AC1 Canteen") <= 20.0,
+          f"Halls -> AC1 canteen = {walk_time('Halls (九龙塘宿舍)', 'AC1 Canteen'):.1f} min (surveyed 15-20)")
+    check(10.0 <= walk_time("Halls (九龙塘宿舍)", "AC2 Canteen (Counter)") <= 15.0,
+          f"Halls -> AC2 canteen = {walk_time('Halls (九龙塘宿舍)', 'AC2 Canteen (Counter)'):.1f} min")
+    check(10.0 <= walk_time("Halls (九龙塘宿舍)", "AC3 Canteen (Counter)") <= 15.0,
+          f"Halls -> AC3 canteen = {walk_time('Halls (九龙塘宿舍)', 'AC3 Canteen (Counter)'):.1f} min")
 
-    matrix = {tuple(origins): OB for origins, OB in ORIGINS.items()}
-    check(len(matrix) == 4, "origin table is complete")
     for origin in ORIGIN_LABELS:
-        for need in USER_NEEDS:
-            for zone_id in zones_for_need(need):
-                total = walk_time(origin, zone_id) + 2.0 + CROWD_PENALTY["Low"]
-                if total <= 0:
-                    check(False, f"route total is positive ({origin} -> {zone_id})")
+        for goal in zones_for_goal(STUDY_GOAL) + zones_for_category(CAT_RICE):
+            total = walk_time(origin, zone_id=goal) + 2.0 + CROWD_PENALTY["Low"]
+            if total <= 0:
+                check(False, f"route total is positive ({origin} -> {goal})")
 
-    print("\n== 5. map geometry ==")
+    print("\n== 5. food categories / menus ==")
+    check(buildings_of(zones_for_category(CAT_RICE)) == {"YEUNG", "LI", "LAU"},
+          "Rice & Quick Meals reachable from all three canteens")
+    check(buildings_of(zones_for_category(CAT_NOODLE)) == {"YEUNG", "LI", "LAU"},
+          "Noodles & Soup reachable from all three canteens")
+    check(buildings_of(zones_for_category(CAT_WESTERN)) == {"YEUNG", "LI"},
+          "Western & Fast Food only at AC1 and AC2")
+    check(buildings_of(zones_for_category(CAT_ASIAN)) == {"YEUNG", "LAU"},
+          "Asian & Curry only at AC1 and AC3")
+
+    ac1 = canteen_dishes("YEUNG", CAT_RICE) + canteen_dishes("YEUNG", CAT_NOODLE) \
+        + canteen_dishes("YEUNG", CAT_WESTERN) + canteen_dishes("YEUNG", CAT_ASIAN)
+    check(len(set(ac1)) == 7, f"AC1 Canteen lists 7 dishes (got {len(set(ac1))})")
+    check({"烧味", "车仔米线", "两餸饭", "拉面 & 牛肉饭", "Pizza", "炸鸡", "东南亚菜"} == set(ac1),
+          f"AC1 dishes match the field menu: {sorted(ac1)}")
+
+    ac2 = set(canteen_dishes("LI", CAT_RICE)) | set(canteen_dishes("LI", CAT_NOODLE)) \
+        | set(canteen_dishes("LI", CAT_WESTERN))
+    check(ac2 == {"两餸饭", "米线", "麻辣烫", "饺子", "意粉 & 焗饭"}, f"AC2 dishes match: {sorted(ac2)}")
+
+    ac3 = set(canteen_dishes("LAU", CAT_RICE)) | set(canteen_dishes("LAU", CAT_NOODLE)) \
+        | set(canteen_dishes("LAU", CAT_ASIAN))
+    check(len(ac3) == 3, f"AC3 dishes match: {sorted(ac3)}")
+    check(not canteen_dishes("LAU", CAT_WESTERN), "AC3 has no Western & Fast Food category")
+
+    print("\n== 6. map geometry ==")
     for zone_id, zone in ZONE_BY_ID.items():
         box = BUILDING_BOXES[zone["building"]]
         x, y = zone["coords"]
-        inside = box["x0"] <= x <= box["x1"] and box["y0"] <= y <= box["y1"]
-        check(inside, f"{zone_id} bubble sits inside its building footprint")
+        check(box["x0"] <= x <= box["x1"] and box["y0"] <= y <= box["y1"],
+              f"{zone_id} bubble sits inside its building footprint")
+    check(set(NETWORK_COORDS) == {"YEUNG", "LI", "LAU", "HALLS"},
+          "connection map has the three towers plus the Halls")
 
-    print("\n== 6. streamlit dashboard ==")
+    print("\n== 7. streamlit dashboard ==")
     from streamlit.testing.v1 import AppTest
 
     app = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=180)

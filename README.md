@@ -5,35 +5,86 @@
 Predict the **queue you are about to walk into** — not the queue you left behind.
 The app predicts waiting time (regression) and congestion level
 `Low / Medium / High` (3-class classification) for nine CityUHK canteens and
-study areas during the 11:30–14:30 lunch peak, then combines that with walking
-time and a crowd penalty to answer one question:
+study areas during the 11:30–14:30 lunch peak, walks you there through the real
+corridor network, and ranks the options by total time:
 
-> *Given where I am, what I need, and when I leave — **where should I go instead**?*
+```
+Total(z) = T_walk(origin, z) + Ŵ(z, t + T_walk) + P_crowd(z)
+```
+
+> *Given where I am, what I feel like eating, and when I leave — **where should I go instead**?*
 
 ---
 
 ## Campus geography used by the model
 
-| Key | Building | Floors modelled | Zones used here |
+| Key | Building | Floors | Zones modelled here |
 | --- | --- | --- | --- |
-| **AC1 / YEUNG** | Yeung Kin Man Academic Building (main teaching building, linked to Festival Walk) | 4/F = LT lecture-theatre zone + Library entrance · **5/F = AC1 Canteen** | AC1 Canteen (5/F), YEUNG 4/F Study Corner, Library 3/F, Library 4/F Quiet Zone |
-| **AC2 / LI** | Li Dak Sum Yip Yio Chin Academic Building (classrooms, computer rooms) | **3/F = AC2 Canteen** | AC2 Canteen (Semi-Buffet), AC2 Canteen (Counter) |
-| **AC3 / LAU** | Lau Ming Wai Academic Building (faculty teaching space) | **7/F = AC3 Bistro** (the AC3 canteen) | AC3 Bistro (Semi-Buffet), AC3 Bistro (Counter), LAU 4/F Study Lounge |
+| **AC1 / YEUNG** | Yeung Kin Man Academic Building (main teaching building, linked to Festival Walk) | 8 | **AC1 Canteen (5/F)**, Library 3/F, Library 4/F Quiet Zone, YEUNG 4/F Study Corner |
+| **AC2 / LI** | Li Dak Sum Yip Yio Chin Academic Building (classrooms, computer rooms) | 9 | **AC2 Canteen (3/F)** — semi-buffet + counter |
+| **AC3 / LAU** | Lau Ming Wai Academic Building | 20 | **AC3 Canteen / Bistro (7/F)** — semi-buffet + counter, LAU 4/F Study Lounge |
+| **Halls** | Student Residence Halls, Kowloon Tong | — | departure point only |
 
-**Departure points** (sidebar): `AC1 (YEUNG 4/F LT)`, `Library (YEUNG 3/F)`,
-`AC2 (LI)`, `AC3 (LAU)`.
+**Departure points** (sidebar): `AC1 (YEUNG 4/F LT)`, `AC2 (LI)`, `AC3 (LAU)`,
+`Halls (九龙塘宿舍)`.
 
-**Walking model** — real pedestrian routes between building entrances, plus a
-lift/stairs allowance inside a building:
+### Walking network
 
-| Route | Minutes | Source |
+`T_walk` is **not** a flat matrix — it is a shortest-path search (Dijkstra) over a
+floor-level graph:
+
+| Link | Minutes |
+| --- | --- |
+| any two floors of the same tower (elevator) | 1.5 |
+| AC1 4/F ↔ AC2 B2 | 5 |
+| AC1 4/F ↔ AC3 G/F | 7 |
+| AC1 5/F ↔ AC2 B2 | 5 |
+| AC1 5/F ↔ AC3 3/F | 5 |
+| AC2 4/F ↔ AC3 5/F | 3 |
+| AC2 G/F ↔ AC3 3/F | 1 |
+| Halls ↔ AC3 | 12 |
+| Halls ↔ AC2 | 12 |
+| Halls ↔ AC1 | 17 |
+
+Example door-to-door results the app actually returns:
+
+| Route | Minutes | Path |
 | --- | --- | --- |
-| same building, one floor | 1.4 | 1.0 min lift/stairs + 0.4 min per floor |
-| AC1/YEUNG ↔ AC2/LI | 3.5 | surveyed ground route |
-| AC1/YEUNG ↔ AC3/LAU | 4.5 | surveyed ground route |
-| AC2/LI ↔ AC3/LAU | 3.0 | surveyed ground route |
-| AC1 4/F LT → AC1 Canteen 5/F | 1.4 | one floor up |
-| AC3 1/F → AC3 Bistro 7/F | 3.4 | six floors |
+| AC1 4/F → AC1 Canteen 5/F | 1.5 | elevator |
+| AC1 4/F → AC2 Canteen 3/F | 6.5 | corridor 5 + lift from B2 |
+| AC1 4/F → AC3 Canteen 7/F | 8.0 | via AC1 5/F ↔ AC3 3/F (5) + lift (1.5) |
+| AC2 G/F → AC3 Canteen 7/F | 2.5 | corridor 1 + lift 1.5 |
+| Halls → AC1 Canteen | 18.0 | Halls → AC1 17 + lift 1.5 |
+| Halls → AC3 Canteen | 13.5 | Halls → AC3 12 + lift 1.5 |
+
+Multiple corridors between the same pair of towers are all in the graph, so the
+search always picks the genuinely fastest floor-to-floor route.
+
+---
+
+## Food categories instead of single dishes
+
+The router filters by **dish family**, not by one dish, so it can balance load
+across canteens:
+
+| Food category | AC1 | AC2 | AC3 |
+| --- | :-: | :-: | :-: |
+| `Any (Fastest Overall)` | ✅ | ✅ | ✅ |
+| `Rice & Quick Meals (两餸饭/烧味/称重自助)` | ✅ | ✅ | ✅ |
+| `Noodles & Soup (米线/面食/麻辣烫)` | ✅ | ✅ | ✅ |
+| `Western & Fast Food (意粉焗饭/Pizza/炸鸡)` | ✅ | ✅ | — |
+| `Asian & Curry (东南亚菜/咖喱饭)` | ✅ | — | ✅ |
+
+Available dishes, shown as tags on every recommendation card:
+
+| Canteen | Dishes |
+| --- | --- |
+| **AC1 Canteen (5/F)** | 烧味 · 车仔米线 · 两餸饭 · 拉面 & 牛肉饭 · Pizza · 炸鸡 · 东南亚菜 |
+| **AC2 Canteen (3/F)** | 两餸饭 · 米线 · 麻辣烫 · 饺子 · 意粉 & 焗饭 |
+| **AC3 Canteen (7/F, Bistro)** | Semi-Buffet（称重自助 + 米饭）· 咖喱饭 · 特色面食 |
+
+A **Study Seat** goal sits next to the food filters and routes to the library
+floors, the Yeung 4/F corner and the Lau 4/F lounge.
 
 ---
 
@@ -47,10 +98,10 @@ survey on campus shows that the AC1 counter is not "one 10-minute queue":
 | AC1 Canteen (AC1 · 5/F) | 2–3 min | 3–5 min | ~2 min | 1 min | **8–11 min** |
 | AC2 Canteen, Semi-Buffet (AC2 · 3/F) | — | 1–5 min | 1–3 min | — | 2–8 min |
 | AC2 Canteen, Counter (AC2 · 3/F) | — | 5–10 min | 1–3 min | — | **6–13 min** |
-| AC3 Bistro, Semi-Buffet (AC3 · 7/F) | — | 1–3 min | 1–5 min | — | 2–8 min |
-| AC3 Bistro, Counter (AC3 · 7/F) | — | 4–5 min | 1–5 min | — | 5–10 min |
-| Library 3/F (AC1 · 3/F), YEUNG 4/F Study Corner | — | — | 6–12 min | — | 6–12 min |
-| LAU 4/F Study Lounge (AC3 · 4/F), Library 4/F Quiet Zone | — | — | 0–2 min | — | 0–2 min |
+| AC3 Canteen, Semi-Buffet (AC3 · 7/F) | — | 1–3 min | 1–5 min | — | 2–8 min |
+| AC3 Canteen, Counter (AC3 · 7/F) | — | 4–5 min | 1–5 min | — | 5–10 min |
+| Library 3/F, YEUNG 4/F Study Corner | — | — | 6–12 min | — | 6–12 min |
+| LAU 4/F Study Lounge, Library 4/F Quiet Zone | — | — | 0–2 min | — | 0–2 min |
 
 Two demand shocks dominate the day: the **11:50** and **12:50** class-dismissal
 waves. They are non-linear, they interact with the *capacity* of each zone
@@ -65,9 +116,10 @@ model cannot.
 - **960 aggregate observations** — 3 teaching weeks × 5 weekdays × 8 fifteen-minute snapshots × 8 zones (of 9, one zone rests per survey day).
 - **Leakage-free evaluation** — chronological split: week 1–2 train (640), week 3 first half validation (160), week 3 second half test (160). No shuffling, no future data.
 - **Four models compared in one table** — historical slot average, plain linear/logistic, and the selected Ridge + MLP pair.
-- **Two interlocking targets** — wait time is built from the phase chain, congestion from the independent occupancy/capacity ratio (Low < 60 %, Medium 60–85 %, High > 85 %).
-- **Schematic 2-D campus map** — AC1/YEUNG, AC2/LI and AC3/LAU footprints with congestion bubbles sized by predicted wait; hover a bubble for the floor, predicted wait, softmax probabilities and the routing reason.
-- **Routing, not just prediction** — `Total(z) = T_walk(u,z) + Ŵ(z, t + T_walk) + P_crowd(z)`; predictions are made for the *arrival* moment.
+- **Two interlocking targets** — wait time built from the phase chain, congestion from the independent occupancy/capacity ratio (Low < 60 %, Medium 60–85 %, High > 85 %).
+- **Corridor network map** — Halls + three towers as a crossing-free node graph with the measured minutes on every link; node colour/size = congestion and predicted wait of that tower.
+- **Floor-level bubble map** — one bubble per zone inside its tower, hover for floor, wait, softmax split and routing reason.
+- **Dish-level transparency** — every card lists the actual dishes behind the selected food category.
 - **Privacy by construction** — aggregated counts and durations only. No identity, no device, no Wi-Fi MAC data.
 - **Runs in seconds on a laptop** — single-row inference under 0.1 ms.
 
@@ -92,7 +144,7 @@ streamlit run app.py
 Then open the printed local URL (default <http://localhost:8501>).
 
 Optional end-to-end verification (dataset → metrics → serving path → walking
-model → map geometry → dashboard render):
+network → food categories → map geometry → dashboard render):
 
 ```bash
 python tests/smoke_test.py
@@ -109,9 +161,9 @@ Held-out **week-3 second half** (160 rows the models never saw).
 
 | Model | Role | Wait-time MAE (min) ↓ | Congestion macro F1 ↑ | Accuracy | Latency (ms / row) |
 | --- | --- | --- | --- | --- | --- |
-| Historical Slot Average | baseline | 2.111 | 0.758 | 0.794 | 0.004 |
-| Linear Regression + Logistic Regression | baseline | 0.952 | 0.799 | 0.844 | 0.053 |
-| **Ridge + MLPClassifier** | **selected** | **0.585** | **0.870** | **0.894** | 0.058 |
+| Historical Slot Average | baseline | 2.111 | 0.758 | 0.794 | 0.005 |
+| Linear Regression + Logistic Regression | baseline | 0.952 | 0.799 | 0.844 | 0.055 |
+| **Ridge + MLPClassifier** | **selected** | **0.585** | **0.870** | **0.894** | 0.066 |
 
 Both selected models beat both baselines: Ridge cuts the wait-time error by
 **~39 %** versus the plain linear regression, and the MLP lifts macro F1 by
@@ -128,8 +180,7 @@ Both selected models beat both baselines: Ridge cuts the wait-time error by
 
 The two baselines are deliberately naive: the slot average only remembers
 `weekday × time-slot`, and the linear/logistic baseline gets the raw one-hot
-block with **no interaction terms and no engineered features** — i.e. the
-textbook model that the selected pipeline has to beat.
+block with **no interaction terms and no engineered features**.
 
 ---
 
@@ -137,7 +188,7 @@ textbook model that the selected pipeline has to beat.
 
 ```
 .
-├── app.py                     # Streamlit dashboard (2 tabs, 2-D campus map)
+├── app.py                     # Streamlit dashboard (2 tabs, 2 maps, food filter)
 ├── requirements.txt
 ├── README.md
 ├── .gitignore
@@ -149,12 +200,12 @@ textbook model that the selected pipeline has to beat.
 │   ├── mlp_model.joblib           # Pipeline(compact features -> MLP)
 │   └── metrics.json               # comparison table + splits + limitations (read by the dashboard)
 ├── src/
-│   ├── campus_config.py       # buildings/floors, zones, phase bottlenecks, walking model, map coords
+│   ├── campus_config.py       # buildings/floors, corridor graph, menus, zones, penalties
 │   ├── features.py            # shared feature engineering + sklearn preprocessors
 │   ├── generate_data.py       # synthetic field-survey data generator
 │   └── train_models.py        # time-ordered split, baselines, tuning, evaluation, persistence
 └── tests/
-    └── smoke_test.py          # dataset / metrics / serving / walking / map / dashboard assertions
+    └── smoke_test.py          # dataset / metrics / serving / network / menu / map / dashboard
 ```
 
 ---
@@ -169,15 +220,15 @@ at one 15-minute snapshot.
 | `week` | int | teaching week 1–3 |
 | `weekday` | str | `Mon` … `Fri` |
 | `time_slot` | str | `09:30, 11:30, 11:45, 12:00, 12:30, 13:00, 13:30, 15:30` |
-| `zone_id` | str | one of the nine zones listed in the geography table above |
+| `zone_id` | str | one of the nine zones listed above |
 | `service_type` | str | `Study` / `Semi-Buffet` / `Counter` |
 | `zone_capacity` | int | seats / standing capacity of the zone |
 | `nearby_class_dismissals` | int | students released by nearby lectures in the last 10 minutes (spikes at 11:50 and 12:50) |
 | `wait_time_mins` | float | **label 1** — sum of the stopwatch-measured phases |
 | `congestion_level` | str | **label 2** — `Low` (<60 %), `Medium` (60–85 %), `High` (>85 % occupancy vs capacity) |
 
-Building and floor are *configuration*, not features: the model does not need
-them, the dashboard does (map position, card labels, hover text).
+Building, floor and menu are *configuration*, not features: the model does not
+need them, the dashboard does (map position, card labels, hover text, filters).
 
 The two labels are generated independently from two different mechanisms
 (phase chain vs occupancy ratio), so the classifier is not just reading the
@@ -192,26 +243,18 @@ so regenerating the CSV gives byte-identical numbers.
 
 ---
 
-## The routing formula
+## Dashboard
 
-For every candidate zone `z` that satisfies the requested need:
+1. **Go Here Instead** — top-3 cards with floor, walking time + arrival clock, predicted wait (±MAE), total time, congestion badge and the matching dish tags.
+2. **Campus connection network** — Halls + AC1/AC2/AC3 as a node graph with the measured corridor minutes on every link; hover a node for the tower's floors, each canteen's wait, walk time and dishes.
+3. **Floor-level congestion** — one bubble per zone inside its tower; size = predicted wait, colour = congestion level.
+4. **Congestion board + MLP softmax confidence** — every zone ranked by total time.
+5. **Per-phase bottleneck table** — where the waiting minutes actually go.
+6. **2-hour look-ahead** — walk + predicted wait for every candidate zone from your departure time.
+7. **Corridor network & canteen menus** (expander) — the raw link table, door-to-door times from your position, and the full menu-to-category mapping.
 
-```
-Total(z) = T_walk(origin, z) + Ŵ(z, t + T_walk(origin, z)) + P_crowd(z)
-```
-
-- `T_walk` — from the departure point to the zone: same building = 1.0 min + 0.4 min per floor; different building = the surveyed entrance-to-entrance distance (3.0–4.5 min).
-- `Ŵ` — Ridge wait-time prediction evaluated at the **arrival** minute, not the departure minute.
-- `P_crowd` — 0 min (Low), 1.5 min (Medium), 4 min (High), because a crowded zone costs you beyond the measured queue.
-- The MLP softmax probabilities for the arrival moment drive the congestion badge, the confidence bars and the penalty.
-
-The dashboard shows:
-
-1. **Go Here Instead** — top-3 cards with floor, walking time, predicted wait (±MAE) and total time.
-2. **Campus congestion map** — schematic AC1/YEUNG, AC2/LI and AC3/LAU footprints; bubble size = predicted wait, colour = congestion level; hover for the floor, the wait, the softmax split and the routing reason.
-3. **Congestion board + MLP softmax confidence** — every zone ranked by total time.
-4. **Per-phase bottleneck table** — where the waiting minutes actually go.
-5. **2-hour look-ahead** — walk + predicted wait for every candidate zone from your departure time.
+Crowd penalty `P_crowd` = 0 min (Low), 1.5 min (Medium), 4 min (High), because a
+crowded zone costs you beyond the measured queue.
 
 ---
 
@@ -226,6 +269,7 @@ The dashboard shows:
 | Multi-class softmax + cross-entropy | MLP output layer; probabilities surfaced in the UI |
 | Feature engineering | interaction one-hots, log/density transforms, capacity-normalised load |
 | Regression + classification metrics | Wait-time MAE, macro F1, accuracy, per-row latency |
+| Graph algorithms | Dijkstra over the corridor network drives every `T_walk` |
 | Deployment | joblib pipelines, one shared serving path, latency measured for every model |
 
 ---
@@ -240,9 +284,11 @@ The dashboard shows:
   inject demand the model has never seen.
 - **Only three teaching weeks** are covered — semester start and exam periods
   behave differently (the library becomes the bottleneck while canteens empty).
-- **The map is schematic.** Bubble positions are a hand-placed 2-D layout for
-  readability, not geo-referenced coordinates; walking times come from the
-  matrix above, never from the drawing.
+- **The maps are schematic.** Node positions are a readable 2-D layout, not
+  geo-referenced coordinates; every walking time comes from the corridor graph,
+  never from the drawing.
+- **The menus are representative**, not a live canteen inventory — stalls rotate
+  by term.
 - **Phase breakdowns are estimates.** The per-phase minutes in the dashboard are
   the predicted total split by the measured stopwatch structure, not five
   independently predicted quantities.

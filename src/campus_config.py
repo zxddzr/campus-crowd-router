@@ -2,23 +2,30 @@
 
 Everything in this module is intentionally human readable: the nine campus
 zones (with their real buildings and floors), the stopwatch-derived bottleneck
-structure of each canteen, the walking-time model and the crowd-penalty
-constants.
+structure of each canteen, the walking-connection network, the canteen menus,
+and the crowd-penalty constants.
 
 Real campus geography used here
 -------------------------------
-* **AC1 / YEUNG** — Yeung Kin Man Academic Building, the main teaching building
-  linked to Festival Walk.  4/F holds the LT lecture-theatre zone and the
-  Library entrance; **5/F is the AC1 Canteen**.  The Library itself is addressed
-  as ``Library (YEUNG 3/F)``.
-* **AC2 / LI** — Li Dak Sum Yip Yio Chin Academic Building (classrooms and
-  computer rooms); **3/F is the AC2 Canteen**.
-* **AC3 / LAU** — Lau Ming Wai Academic Building; **7/F is the AC3 Bistro**
-  (a.k.a. the AC3 canteen).
+* **AC1 / YEUNG** — Yeung Kin Man Academic Building, 8 floors, the main teaching
+  building linked to Festival Walk.  4/F holds the LT lecture-theatre zone and
+  the Library entrance; **5/F is the AC1 Canteen**.
+* **AC2 / LI** — Li Dak Sum Yip Yio Chin Academic Building, 9 floors (classrooms
+  and computer rooms); **3/F is the AC2 Canteen**.
+* **AC3 / LAU** — Lau Ming Wai Academic Building, 20 floors; **7/F is the AC3
+  Canteen (Bistro)**.
+* **Halls** — the Kowloon Tong student residence, a common departure point.
 
-Walking model: inter-building doors follow the real pedestrian routes
-(AC1 <-> AC2 ~3.5 min, AC1 <-> AC3 ~4.5 min, AC2 <-> AC3 ~3 min) and a change
-of floor inside the same building costs 1.0 min + 0.4 min per floor.
+Walking model
+-------------
+``T_walk`` is a real shortest-path search over the corridor network, not a
+flat matrix:
+
+* inside a building an elevator ride between any two floors costs
+  ``VERTICAL_FLAT`` minutes (the "1-2 min per floor change" rule);
+* between buildings the measured corridor links below are used, both ways;
+* the residence halls connect to each tower with the surveyed walking ranges
+  (AC3 / AC2 ~10-15 min -> 12; AC1 ~15-20 min -> 17).
 
 The numbers below encode field observations taken on the CityUHK campus during
 the 11:30-14:30 lunch peak.  Each canteen is modelled as a *chain of queues*
@@ -32,6 +39,7 @@ device identifier, Wi-Fi MAC address or any other personal data is used.
 
 from __future__ import annotations
 
+import heapq
 import math
 from typing import Final
 
@@ -40,7 +48,7 @@ from typing import Final
 # --------------------------------------------------------------------------- #
 PROJECT_NAME: Final[str] = "Smart Campus Crowd-Balancing and Space Routing Engine"
 PROJECT_SUBTITLE: Final[str] = "GE2340 · City University of Hong Kong"
-PROJECT_VERSION: Final[str] = "1.1.0"
+PROJECT_VERSION: Final[str] = "1.2.0"
 
 # --------------------------------------------------------------------------- #
 # Temporal grid
@@ -104,35 +112,72 @@ CROWD_PENALTY: Final[dict[str, float]] = {"Low": 0.0, "Medium": 1.5, "High": 4.0
 # Buildings
 # --------------------------------------------------------------------------- #
 BUILDINGS: Final[tuple[str, ...]] = ("YEUNG", "LI", "LAU")
+HALLS: Final[str] = "HALLS"
 
 BUILDING_LABELS: Final[dict[str, str]] = {
     "YEUNG": "Yeung Kin Man Academic Building (AC1)",
     "LI": "Li Dak Sum Yip Yio Chin Academic Building (AC2)",
     "LAU": "Lau Ming Wai Academic Building (AC3)",
+    HALLS: "Student Residence Halls, Kowloon Tong",
 }
 BUILDING_SHORT: Final[dict[str, str]] = {
     "YEUNG": "AC1 · YEUNG",
     "LI": "AC2 · LI",
     "LAU": "AC3 · LAU",
+    HALLS: "Halls",
+}
+BUILDING_FLOORS: Final[dict[str, int]] = {"YEUNG": 8, "LI": 9, "LAU": 20}
+
+# --------------------------------------------------------------------------- #
+# Walking network (bipartite floor nodes + measured corridor links)
+# --------------------------------------------------------------------------- #
+# Floor nodes we need: departure points, corridor endpoints and every zone.
+FLOOR_NODES: Final[dict[str, tuple[str, ...]]] = {
+    "YEUNG": ("G", "3F", "4F", "5F"),
+    "LI": ("B2", "G", "3F", "4F"),
+    "LAU": ("G", "3F", "4F", "5F", "7F"),
+    HALLS: ("G",),
 }
 
-# Inter-building walking minutes between ground-level entrances (symmetric).
-BASE_WALK: Final[dict[str, dict[str, float]]] = {
-    "YEUNG": {"YEUNG": 0.0, "LI": 3.5, "LAU": 4.5},
-    "LI": {"YEUNG": 3.5, "LI": 0.0, "LAU": 3.0},
-    "LAU": {"YEUNG": 4.5, "LI": 3.0, "LAU": 0.0},
-}
+# An elevator ride between any two floors of the same tower: 1-2 minutes.
+VERTICAL_FLAT: Final[float] = 1.5
 
-# Same-building floor change: fixed lift/stairs overhead + per-floor cost.
-VERTICAL_BASE: Final[float] = 1.0
-VERTICAL_PER_FLOOR: Final[float] = 0.4
+# Measured corridor links between buildings (minutes, bidirectional).
+# AC1 4/F  <-> AC2 B2   ~5      AC1 4/F <-> AC3 G/F   ~7
+# AC1 5/F  <-> AC2 B2   ~5      AC1 5/F <-> AC3 3/F   ~5
+# AC2 4/F  <-> AC3 5/F  ~3      AC2 G/F <-> AC3 3/F   ~1
+# Halls <-> AC3 12  ·  Halls <-> AC2 12  ·  Halls <-> AC1 17
+CORRIDOR_LINKS: Final[tuple[tuple[str, str, float], ...]] = (
+    ("YEUNG-4F", "LI-B2", 5.0),
+    ("YEUNG-4F", "LAU-G", 7.0),
+    ("YEUNG-5F", "LI-B2", 5.0),
+    ("YEUNG-5F", "LAU-3F", 5.0),
+    ("LI-4F", "LAU-5F", 3.0),
+    ("LI-G", "LAU-3F", 1.0),
+    ("HALLS-G", "YEUNG-G", 17.0),
+    ("HALLS-G", "LI-G", 12.0),
+    ("HALLS-G", "LAU-G", 12.0),
+)
+
+# Human readable corridor list for the dashboard / README.
+CORRIDOR_TABLE: Final[tuple[tuple[str, str, float], ...]] = (
+    ("AC1 4/F", "AC2 B2", 5.0),
+    ("AC1 4/F", "AC3 G/F", 7.0),
+    ("AC1 5/F", "AC2 B2", 5.0),
+    ("AC1 5/F", "AC3 3/F", 5.0),
+    ("AC2 4/F", "AC3 5/F", 3.0),
+    ("AC2 G/F", "AC3 3/F", 1.0),
+    ("Halls", "AC3", 12.0),
+    ("Halls", "AC2", 12.0),
+    ("Halls", "AC1", 17.0),
+)
 
 # --------------------------------------------------------------------------- #
 # Zones
 # --------------------------------------------------------------------------- #
-# coords = schematic 2-D position used by the dashboard map (not geo-accurate).
-# phases = (label, low-value, peak-value); realised wait is
-#          floor*0.35 + (peak - floor*0.35) * load_factor.
+# node = floor node used by the walking graph
+# coords = schematic 2-D position for the floor-level bubble map
+# phases = (label, low-value, peak-value)
 ZONES: Final[tuple[dict, ...]] = (
     {
         "zone_id": "AC1 Canteen",
@@ -140,6 +185,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "YEUNG",
         "floor": 5,
         "floor_label": "AC1 · 5/F",
+        "node": "YEUNG-5F",
         "capacity": 300,
         "popularity": 1.00,
         "coords": (0.45, 0.55),
@@ -149,7 +195,7 @@ ZONES: Final[tuple[dict, ...]] = (
             ("Find a seat", 1.5, 2.2),
             ("Utensils & condiments", 0.8, 1.0),
         ),
-        "note": "Yeung 5/F counter: screen 2-3 min + pickup 3-5 min + seat 2 min + utensils 1 min.",
+        "note": "Yeung 5/F canteen: screen 2-3 min + pickup 3-5 min + seat 2 min + utensils 1 min.",
     },
     {
         "zone_id": "AC2 Canteen (Semi-Buffet)",
@@ -157,6 +203,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "LI",
         "floor": 3,
         "floor_label": "AC2 · 3/F",
+        "node": "LI-3F",
         "capacity": 260,
         "popularity": 0.88,
         "coords": (1.60, 0.30),
@@ -172,6 +219,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "LI",
         "floor": 3,
         "floor_label": "AC2 · 3/F",
+        "node": "LI-3F",
         "capacity": 210,
         "popularity": 0.82,
         "coords": (1.60, -0.30),
@@ -182,11 +230,12 @@ ZONES: Final[tuple[dict, ...]] = (
         "note": "Li 3/F counter: seat 1-3 min + pickup 5-10 min (slowest counter on campus).",
     },
     {
-        "zone_id": "AC3 Bistro (Semi-Buffet)",
+        "zone_id": "AC3 Canteen (Semi-Buffet)",
         "service_type": "Semi-Buffet",
         "building": "LAU",
         "floor": 7,
         "floor_label": "AC3 · 7/F",
+        "node": "LAU-7F",
         "capacity": 240,
         "popularity": 0.76,
         "coords": (3.00, 0.45),
@@ -194,14 +243,15 @@ ZONES: Final[tuple[dict, ...]] = (
             ("Find a seat", 1.0, 5.0),
             ("Semi-buffet serving", 1.0, 3.0),
         ),
-        "note": "Lau 7/F AC3 Bistro semi-buffet: seat 1-5 min + serving 1-3 min.",
+        "note": "Lau 7/F AC3 Canteen (Bistro) semi-buffet: seat 1-5 min + serving 1-3 min.",
     },
     {
-        "zone_id": "AC3 Bistro (Counter)",
+        "zone_id": "AC3 Canteen (Counter)",
         "service_type": "Counter",
         "building": "LAU",
         "floor": 7,
         "floor_label": "AC3 · 7/F",
+        "node": "LAU-7F",
         "capacity": 200,
         "popularity": 0.70,
         "coords": (3.00, -0.10),
@@ -209,7 +259,7 @@ ZONES: Final[tuple[dict, ...]] = (
             ("Find a seat", 1.0, 5.0),
             ("Counter food pickup", 4.0, 5.0),
         ),
-        "note": "Lau 7/F AC3 Bistro counter: seat 1-5 min + pickup 4-5 min.",
+        "note": "Lau 7/F AC3 Canteen (Bistro) counter: seat 1-5 min + pickup 4-5 min.",
     },
     {
         "zone_id": "Library 3/F",
@@ -217,6 +267,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "YEUNG",
         "floor": 3,
         "floor_label": "Library · 3/F",
+        "node": "YEUNG-3F",
         "capacity": 180,
         "popularity": 1.05,
         "coords": (-0.55, -0.45),
@@ -229,6 +280,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "YEUNG",
         "floor": 4,
         "floor_label": "AC1 · 4/F",
+        "node": "YEUNG-4F",
         "capacity": 120,
         "popularity": 0.90,
         "coords": (-0.55, 0.55),
@@ -241,6 +293,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "LAU",
         "floor": 4,
         "floor_label": "AC3 · 4/F",
+        "node": "LAU-4F",
         "capacity": 140,
         "popularity": 0.58,
         "coords": (3.00, 1.05),
@@ -253,6 +306,7 @@ ZONES: Final[tuple[dict, ...]] = (
         "building": "YEUNG",
         "floor": 4,
         "floor_label": "Library · 4/F",
+        "node": "YEUNG-4F",
         "capacity": 150,
         "popularity": 0.55,
         "coords": (0.45, -0.45),
@@ -264,7 +318,7 @@ ZONES: Final[tuple[dict, ...]] = (
 ZONE_IDS: Final[tuple[str, ...]] = tuple(z["zone_id"] for z in ZONES)
 ZONE_BY_ID: Final[dict[str, dict]] = {z["zone_id"]: z for z in ZONES}
 
-# Schematic footprints for the dashboard map (x0, x1, y0, y1).
+# Schematic footprints for the floor-level bubble map (x0, x1, y0, y1).
 BUILDING_BOXES: Final[dict[str, dict[str, float]]] = {
     "YEUNG": {"x0": -0.95, "x1": 0.95, "y0": -0.80, "y1": 0.95},
     "LI": {"x0": 1.05, "x1": 2.15, "y0": -0.70, "y1": 0.70},
@@ -276,26 +330,73 @@ BUILDING_ANCHORS: Final[dict[str, tuple[float, float]]] = {
     "LAU": (3.00, 1.35),
 }
 
+# Node positions for the connection-network map.  A planar (crossing-free)
+# K4 layout: the Halls sit north of the AC1-AC2 axis, the three towers run
+# west to east, which keeps every corridor line readable.
+NETWORK_COORDS: Final[dict[str, tuple[float, float]]] = {
+    "YEUNG": (-1.30, 0.05),
+    "LI": (0.55, 0.05),
+    "LAU": (1.80, -0.35),
+    HALLS: (-0.55, 1.35),
+}
+
 # --------------------------------------------------------------------------- #
 # Departure points
 # --------------------------------------------------------------------------- #
-# label -> (building, floor)
-ORIGINS: Final[dict[str, tuple[str, int]]] = {
-    "AC1 (YEUNG 4/F LT)": ("YEUNG", 4),
-    "Library (YEUNG 3/F)": ("YEUNG", 3),
-    "AC2 (LI)": ("LI", 1),
-    "AC3 (LAU)": ("LAU", 1),
+# label -> floor node
+ORIGINS: Final[dict[str, str]] = {
+    "AC1 (YEUNG 4/F LT)": "YEUNG-4F",
+    "AC2 (LI)": "LI-G",
+    "AC3 (LAU)": "LAU-G",
+    "Halls (九龙塘宿舍)": "HALLS-G",
 }
 ORIGIN_LABELS: Final[tuple[str, ...]] = tuple(ORIGINS)
 
 # --------------------------------------------------------------------------- #
-# Demand goals
+# Canteen menu (food categories drive the routing filter)
 # --------------------------------------------------------------------------- #
-USER_NEEDS: Final[dict[str, str]] = {
-    "Quick Semi-Buffet": "Semi-Buffet",
-    "Counter Meal": "Counter",
-    "Study Seat": "Study",
+CAT_ANY: Final[str] = "Any (Fastest Overall)"
+CAT_RICE: Final[str] = "Rice & Quick Meals (两餸饭/烧味/称重自助)"
+CAT_NOODLE: Final[str] = "Noodles & Soup (米线/面食/麻辣烫)"
+CAT_WESTERN: Final[str] = "Western & Fast Food (意粉焗饭/Pizza/炸鸡)"
+CAT_ASIAN: Final[str] = "Asian & Curry (东南亚菜/咖喱饭)"
+
+FOOD_CATEGORIES: Final[tuple[str, ...]] = (CAT_ANY, CAT_RICE, CAT_NOODLE, CAT_WESTERN, CAT_ASIAN)
+FOOD_CATEGORY_HINT: Final[dict[str, str]] = {
+    CAT_ANY: "No constraint - just the smallest door-to-door time.",
+    CAT_RICE: "Two-dish rice, siu mei, weighed buffet.",
+    CAT_NOODLE: "Rice noodles, noodle soups, mala tang.",
+    CAT_WESTERN: "Pasta & baked rice, pizza, fried chicken.",
+    CAT_ASIAN: "South-East Asian plates and curry rice.",
 }
+
+# building -> {dish: categories it belongs to}
+CANTEEN_MENU: Final[dict[str, dict[str, tuple[str, ...]]]] = {
+    "YEUNG": {
+        "烧味": (CAT_RICE,),
+        "两餸饭": (CAT_RICE,),
+        "车仔米线": (CAT_NOODLE,),
+        "拉面 & 牛肉饭": (CAT_NOODLE,),
+        "Pizza": (CAT_WESTERN,),
+        "炸鸡": (CAT_WESTERN,),
+        "东南亚菜": (CAT_ASIAN,),
+    },
+    "LI": {
+        "两餸饭": (CAT_RICE,),
+        "米线": (CAT_NOODLE,),
+        "麻辣烫": (CAT_NOODLE,),
+        "饺子": (CAT_NOODLE,),
+        "意粉 & 焗饭": (CAT_WESTERN,),
+    },
+    "LAU": {
+        "Semi-Buffet（称重自助 + 米饭）": (CAT_RICE,),
+        "咖喱饭": (CAT_ASIAN,),
+        "特色面食": (CAT_NOODLE,),
+    },
+}
+
+# Study goal stays available next to the canteen filters.
+STUDY_GOAL: Final[str] = "Study Seat"
 
 
 # --------------------------------------------------------------------------- #
@@ -319,18 +420,92 @@ def quantize_slot(total_minutes: float) -> str:
     return from_minutes(quantised)
 
 
-def walk_time(origin_label: str, zone_id: str) -> float:
-    """Door-to-door walking minutes from a departure point to a zone.
+def _build_adjacency() -> dict[str, list[tuple[str, float]]]:
+    graph: dict[str, list[tuple[str, float]]] = {}
 
-    Same building -> lift/stairs overhead plus a per-floor cost.
-    Different building -> the measured ground-route distance between entrances.
+    def add(a: str, b: str, weight: float) -> None:
+        graph.setdefault(a, []).append((b, weight))
+        graph.setdefault(b, []).append((a, weight))
+
+    for building, floors in FLOOR_NODES.items():
+        nodes = [f"{building}-{f}" for f in floors]
+        for i, a in enumerate(nodes):
+            for b in nodes[i + 1:]:
+                add(a, b, VERTICAL_FLAT)      # elevator between any two floors
+    for a, b, weight in CORRIDOR_LINKS:
+        add(a, b, weight)
+    return graph
+
+
+_ADJACENCY: Final[dict[str, list[tuple[str, float]]]] = _build_adjacency()
+
+
+def shortest_walk(origin_node: str, target_node: str) -> float:
+    """Dijkstra over the floor-level walking network (minutes)."""
+    if origin_node == target_node:
+        return 0.0
+    dist: dict[str, float] = {origin_node: 0.0}
+    queue: list[tuple[float, str]] = [(0.0, origin_node)]
+    while queue:
+        cost, node = heapq.heappop(queue)
+        if node == target_node:
+            return round(cost, 2)
+        if cost > dist.get(node, math.inf):
+            continue
+        for neighbour, weight in _ADJACENCY.get(node, []):
+            new_cost = cost + weight
+            if new_cost < dist.get(neighbour, math.inf):
+                dist[neighbour] = new_cost
+                heapq.heappush(queue, (new_cost, neighbour))
+    raise ValueError(f"no walking path from {origin_node} to {target_node}")
+
+
+def walk_time(origin_label: str, zone_id: str) -> float:
+    """Door-to-door walking minutes from a departure point to a zone."""
+    return shortest_walk(ORIGINS[origin_label], ZONE_BY_ID[zone_id]["node"])
+
+
+def building_hop_minutes(a: str, b: str) -> float:
+    """Shortest measured corridor between two buildings (Halls included).
+
+    This is the *corridor only* figure shown on the network map; door-to-door
+    times also add the elevator ride to the right floor.
     """
-    origin_building, origin_floor = ORIGINS[origin_label]
-    zone = ZONE_BY_ID[zone_id]
-    if zone["building"] == origin_building:
-        floors = abs(int(zone["floor"]) - int(origin_floor))
-        return round(VERTICAL_BASE + VERTICAL_PER_FLOOR * floors, 1)
-    return round(BASE_WALK[origin_building][zone["building"]], 1)
+    if a == b:
+        return 0.0
+    best = math.inf
+    for left, right, weight in CORRIDOR_LINKS:
+        if {left.split("-")[0], right.split("-")[0]} == {a, b}:
+            best = min(best, weight)
+    return round(best, 1)
+
+
+def canteen_dishes(building: str, category: str) -> tuple[str, ...]:
+    """Dishes available in a building for a food category."""
+    menu = CANTEEN_MENU.get(building, {})
+    if category == CAT_ANY:
+        return tuple(menu)
+    return tuple(dish for dish, cats in menu.items() if category in cats)
+
+
+def zones_for_category(category: str) -> list[str]:
+    """Canteen zones that can serve a food category."""
+    return [
+        z["zone_id"]
+        for z in ZONES
+        if z["service_type"] != "Study" and canteen_dishes(z["building"], category)
+    ]
+
+
+def zones_for_study() -> list[str]:
+    return [z["zone_id"] for z in ZONES if z["service_type"] == "Study"]
+
+
+def zones_for_goal(goal_label: str) -> list[str]:
+    """Candidate zones for a goal (a food category label or ``Study Seat``)."""
+    if goal_label == STUDY_GOAL:
+        return zones_for_study()
+    return zones_for_category(goal_label)
 
 
 def expected_dismissals(minute_of_day: float) -> int:
@@ -350,11 +525,7 @@ def expected_dismissals(minute_of_day: float) -> int:
 
 
 def phase_weights(zone_id: str) -> list[tuple[str, float]]:
-    """Relative share of each bottleneck phase at full load.
-
-    Used by the dashboard to break a *predicted total* wait into phases in an
-    interpretable way without ever leaking per-phase labels into training.
-    """
+    """Relative share of each bottleneck phase at full load."""
     zone = ZONE_BY_ID[zone_id]
     raw = [(label, (floor * 0.35 + peak) / 2.0) for label, floor, peak in zone["phases"]]
     total = sum(v for _, v in raw) or 1.0
@@ -364,12 +535,6 @@ def phase_weights(zone_id: str) -> list[tuple[str, float]]:
 def phase_breakdown(zone_id: str, predicted_wait: float) -> list[tuple[str, float]]:
     """Split a predicted total wait into per-phase minutes."""
     return [(label, round(predicted_wait * share, 1)) for label, share in phase_weights(zone_id)]
-
-
-def zones_for_need(need_label: str) -> list[str]:
-    """Candidate zones for a demand goal."""
-    service = USER_NEEDS[need_label]
-    return [z["zone_id"] for z in ZONES if z["service_type"] == service]
 
 
 def zone_hover_label(zone_id: str) -> str:

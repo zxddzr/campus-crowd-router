@@ -1,6 +1,6 @@
 {
   "project": "Smart Campus Crowd-Balancing and Space Routing Engine",
-  "generated_at": "2026-11-22T20:11:42+08:00",
+  "generated_at": "2026-11-22T20:44:31+08:00",
   "dataset": {
     "file": "data/cityuhk_campus_data.csv",
     "rows": 960,
@@ -66,7 +66,7 @@
       "mae_wait_mins": 2.111234375,
       "macro_f1": 0.7578401280708723,
       "accuracy": 0.79375,
-      "latency_ms_per_row": 0.0035274999390821904,
+      "latency_ms_per_row": 0.00519874993187841,
       "kind": "baseline",
       "detail": "weekday x time-slot historical mean / majority class, global fallback"
     },
@@ -74,7 +74,7 @@
       "mae_wait_mins": 0.9521718514259957,
       "macro_f1": 0.7985910782223337,
       "accuracy": 0.84375,
-      "latency_ms_per_row": 0.05247375011094846,
+      "latency_ms_per_row": 0.055007499759085476,
       "kind": "baseline",
       "detail": "plain one-hot block, softmax cross-entropy logistic classifier, no feature engineering"
     },
@@ -82,7 +82,7 @@
       "mae_wait_mins": 0.585368119332847,
       "macro_f1": 0.8700226757369615,
       "accuracy": 0.89375,
-      "latency_ms_per_row": 0.05754999983764719,
+      "latency_ms_per_row": 0.06548749988724012,
       "kind": "selected",
       "detail": "Ridge alpha=0.3 (L2, tuned on validation), MLP (32,) ReLU+Adam alpha=1e-05 seed=7"
     }
